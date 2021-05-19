@@ -1,0 +1,227 @@
+<!doctype html>
+<html>
+    <head>
+        <title>camera</title>
+        <style>
+            #user-list>li {
+                font-size: 24px;
+            }
+        </style>
+    </head>
+    <body>
+        <h1 id="user-id">用户名称</h1>
+        <ul id="user-list">
+            <li>用户12</li>
+            <li>用户23</li>
+            <li>用户34</li>
+        </ul>
+        <video id="video-local" controls autoplay></video>
+        <div id="videos"></div> 
+    </body>
+    <script src="//cdn.bootcdn.net/ajax/libs/jquery/3.4.1/jquery.js"></script>
+    <script src="//cdn.bootcdn.net/ajax/libs/socket.io/3.0.4/socket.io.js"></script>
+    <script>
+        //封装获取用户媒体的函数
+        function getUserMedia(constrains,success,error){
+            let promise;
+            if(navigator.mediaDevices.getUserMedia){//最新标准API
+                promise = navigator.mediaDevices.getUserMedia(constrains).then(success).catch(error);
+            }else if(navigator.webkitGetUserMedia){
+                //webkit内核浏览器
+                promise = navigator.webkitGetUserMedia(constrains).then(success).catch(error);
+            }else if(navigator.mozGetUserMedia){
+                //fireFox 浏览器
+                promise = navigator.mozGetUserMedia(constrains).then(success).catch(error);
+            }else if(navigator.getUserMedia){
+                //旧版API
+                promise = navigator.getUserMedia(constrains).then(success).catch(error);
+            }
+            return promise;
+        }
+        //封装判断摄像头是否能够使用的函数，当这四个函数全为空时，那么我们无法打开用户摄像头
+        function canGetUserMedia(){
+            return !!(navigator.mediaDevices.getUserMedia ||navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia);
+        }
+        const localVideoElm = document.getElementById('video-local');
+        $(document).ready(function(){
+            
+
+        });
+
+        //STUN,TURN服务器配置参数
+        const iceServer = {
+            iceServers: [
+                {
+                    urls:["stun:ss-turn1.xirsys.com"]
+                },
+                {
+                    urls: [
+                        "turn:ss-turn1.xirsys.com:80?transport=udp",
+                        "turn:ss-turn1.xirsys.com:3478?transport=udp"
+                    ],
+                    username: "CEqIDkX5f51sbm7-pXxJVXePoMk_WB7w2J5eu0Bd00YpiONHlLHrwSb7hRMDDrqGAAAAAF_OT9V0dWR1d2Vi",
+                    credential: "446118be-38a4-11eb-9ece-0242ac140004"
+                    
+                }
+            ]
+        };
+
+        //peerConnection
+        var pc = [];
+        var localStream = null;
+        function InitCamera(){
+            if(canGetUserMedia()){
+                getUserMedia({
+                    video:true,//是否打开视频图像
+                    audio:false//是否打开音频
+                },(stream)=>{
+                    localStream = stream;
+                    localVideoElm.srcObject = stream;
+                    $(localVideoElm).width(800);
+                },(error) => {
+                    console.log("访问用户媒体设备失败：" , err.name ,err.message);
+                })
+            } else {
+                alert('您的浏览器不兼容，建议安装最新版Chrome浏览器');
+            }
+        }
+        function StartCall(parterName , createOffer){
+
+            pc[parterName] = new RTCPeerConnection(iceServer);
+
+            //如果已经有本地流，那么直接获取Tracks并调用addTrack添加到RTC对象中
+            if(localStream){
+                localStream.getTracks().forEach((track) => {
+                    pc[parterName].addTrack(track , localStream);
+                });
+            }else{//否则需要重新启动摄像头并获取
+                InitCamera();
+            }
+
+            //如果是呼叫方，那么需要createOffer请求
+            if(createOffer){
+                //每当webrtc基础结构需要你重新启动会话协商过程时，都会调用此函数，它的工作是创建和发送一个请求，给被叫方，要求它与我们联系
+                pc[parterName].onnegotiationneeded = () => {
+                    //https://developer.mozilla.org/zh- CN/docs/Web/API/RTCPeerConnection/createOffer
+                    pc[parterName].createOffer().then((offer) =>{
+                        return pc[parterName].setLocalDescription(offer);
+                    }).then(() => {
+                        //把发送者的描述信息通过signal server 发送到接收者
+                        socket.emit('sdp',{
+                            typ: 'video-offer',
+                            description: pc[parterName].localDescription,
+                            to: parterName,
+                            sender: socket.id
+                        });
+                    })
+                };
+            }
+
+            //当需要你通过信令服务器将一个ICE候选发送给另一个对等端时，本地ICE层将会调用你的icecandiate事件处理程序。有关更多信息，请参阅sending ICE candidates 以查看此示例的代码。
+            pc[parterName].onicecandidate = ({candidate}) => {
+                socket.emit('ice candidates' , {
+                    candidate: candidate,
+                    to: parterName,
+                    sender: socket.id
+                });
+            };
+            //当向连接中添加磁道时，track 事件的此处处理程序由本地webrtc层调用。例如，可以将传入媒体链接到元素以显示它。详见Receiving new streams
+            pc[parterName].ontrack = (ev) =>{
+                let str = ev.streams[0];
+                if(document.getElementById(`${parterName}-video`)){
+                    document.getElementById(`${parterName}-video`).srcObject = str;
+                }else{
+                    let newVideo = document.createElement('video');
+                    newVideo.id = `${parterName}-video`;
+                    newVideo.autoplay = true;
+                    newVideo.controls = true;
+                    //newVideo.className = 'REMOTE-VIDEO';
+                    newVideo.srcObject = str;
+                    document.getElementById('videos').appendChild(newVideo);
+                }
+            }
+        }
+
+
+        var socket = io();
+        socket.on('connect' ,() => {
+            InitCamera();
+            //输出内容 其中socket.id 是当前socket连接的唯一ID
+            console.log('connect' + socket.id);
+
+            $('#user-id').text(socket.id);
+
+            pc.push(socket.id);
+
+            socket.emit('new user greet' , {sender:socket.id, msg : 'hello world'}); 
+   
+            socket.on('need connect',(data) => {
+                console.log(data);
+                let li = $('<li></li>').text(data.sender).attr('user-id' , data.sender);
+                $('#user-list').append(li);
+                //创建一个按钮
+                let button = $('<button class="call">通话</button>');
+                button.appendTo(li);
+                //监听按钮的点击事件，需要添加很多东西，比如不能重复拨打已经连接的用户
+                $(button).click(function(){
+                    console.log($(this).parent().attr('user-id'));
+                    //点击时，开启对该用户的通话
+                    StartCall($(this).parent().attr('user-id') ,true);
+                })
+                socket.emit('ok we connect', {receiver : data.sender ,sender : socket.id});
+            });
+
+            //某个用户失去连接时，需要将其从列表中移除
+            socket.on('user disconnected',(socket_id) => {
+                console.log('user disconnected' + socket_id);
+                $('#user-list li[user-id="'+ socket_id+'"]').remove();
+            });
+
+            //可以连接
+            socket.on('ok we connect',(data) => {
+                console.log('ok we connect' + data);
+                $('#user-list').append($('<li></li>').text(data.sender).attr('user-id' , data.sender));
+            });
+
+            //监听发送的sdp事件
+            socket.on('sdp' ,(data) => {
+                //如果是offer类型的sdp
+                if(data.description.type === 'offer'){
+                    //那么被呼叫者需要开启RTC的一套流程，同时不需要createOffer，所以第二个参数为false
+                    StartCall(data.sender ,false);
+                    //把发送者（offer）的描述，存储在接收者的remoteDesc中
+                    let desc = new RTCSessionDescription(data.description);
+                    //按1-13流程
+                    pc[data.sender].setRemoteDescription(desc).then(() => {
+                        pc[data.sender].createAnswer().then((answer) => {
+                            return pc[data.sender].setLocalDescription(answer);
+                        }).then(() => {
+                            socket.emit('sdp',{
+                                type: 'video-answer',
+                                description: pc[data.sender].localDescription,
+                                to: data.sender,
+                                sender: socket.id
+                            });
+                        }).catch();
+                    })
+
+                }else if(data.description.type === 'answer'){
+                    //如果是应答类消息（那么接收到这个事件的是呼叫者）
+                    let desc = new RTCSessionDescription(data.description);
+                    pc[data.sender].setRemoteDescription(desc);
+                }
+            })
+            //如果是ice candidates的协商信息
+            socket.on('ice candidates', (data) => {
+                console.log('ice candidates: ' + data.candidate );
+                //{candidate:candidate, to:partnerName,sender:socketId}
+                //如果ice candidate 非空（当candidate为空时，那么本次协商流程到此结束）
+                if(data.candidate){
+                    var candidate = new RTCIceCandidate(data.candidate);
+                    pc[data.sender].addIceCandidate(candidate).catch();
+                }
+            })
+        })
+      
+    </script>
+</html>
